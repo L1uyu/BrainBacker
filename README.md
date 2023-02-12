@@ -1,1 +1,1 @@
-A GPU Light Baker Using DXR
+A GPU Light Baker
