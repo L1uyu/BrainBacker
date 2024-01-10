@@ -10,8 +10,6 @@ add_subdirectory(webgpu)
 add_subdirectory(glfw3webgpu)
 add_executable(Baker
 	main.cpp
-	webgpu-utils.h
-	webgpu-utils.cpp
 )
 target_link_libraries(Baker PRIVATE glfw webgpu glfw3webgpu)
 target_copy_webgpu_binaries(Baker)
