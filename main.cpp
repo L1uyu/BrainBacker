@@ -6,8 +6,33 @@
 
 #include <iostream>
 #include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <array>
 
 using namespace wgpu;
+namespace fs = std::filesystem;
+
+/**
+ * The same structure as in the shader, replicated in C++
+ */
+struct MyUniforms {
+	// offset = 0 * sizeof(vec4f) -> OK
+	std::array<float, 4> color;
+
+	// offset = 16 = 4 * sizeof(f32) -> OK
+	float time;
+
+	// Add padding to make sure the struct is host-shareable
+	float _pad[3];
+};
+// Have the compiler check byte alignment
+static_assert(sizeof(MyUniforms) % 16 == 0);
+
+ShaderModule loadShaderModule(const fs::path& path, Device device);
+bool loadGeometry(const fs::path& path, std::vector<float>& pointData, std::vector<uint16_t>& indexData);
 
 int main (int, char**) {
 	Instance instance = createInstance(InstanceDescriptor{});
@@ -31,16 +56,34 @@ int main (int, char**) {
 
 	std::cout << "Requesting adapter..." << std::endl;
 	Surface surface = glfwGetWGPUSurface(instance, window);
-	RequestAdapterOptions adapterOpts;
+	RequestAdapterOptions adapterOpts{};
 	adapterOpts.compatibleSurface = surface;
 	Adapter adapter = instance.requestAdapter(adapterOpts);
 	std::cout << "Got adapter: " << adapter << std::endl;
 
+	SupportedLimits supportedLimits;
+	adapter.getLimits(&supportedLimits);
+
 	std::cout << "Requesting device..." << std::endl;
+	RequiredLimits requiredLimits = Default;
+	requiredLimits.limits.maxVertexAttributes = 2;
+	requiredLimits.limits.maxVertexBuffers = 1;
+	requiredLimits.limits.maxBufferSize = 15 * 5 * sizeof(float);
+	requiredLimits.limits.maxVertexBufferArrayStride = 5 * sizeof(float);
+	requiredLimits.limits.minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment;
+	requiredLimits.limits.minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment;
+	requiredLimits.limits.maxInterStageShaderComponents = 3;
+	// We use at most 1 bind group for now
+	requiredLimits.limits.maxBindGroups = 1;
+	// We use at most 1 uniform buffer per stage
+	requiredLimits.limits.maxUniformBuffersPerShaderStage = 1;
+	// Uniform structs have a size of maximum 16 float
+	requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4;
+
 	DeviceDescriptor deviceDesc;
 	deviceDesc.label = "My Device";
 	deviceDesc.requiredFeaturesCount = 0;
-	deviceDesc.requiredLimits = nullptr;
+	deviceDesc.requiredLimits = &requiredLimits;
 	deviceDesc.defaultQueue.label = "The default queue";
 	Device device = adapter.requestDevice(deviceDesc);
 	std::cout << "Got device: " << device << std::endl;
@@ -70,76 +113,44 @@ int main (int, char**) {
 	std::cout << "Swapchain: " << swapChain << std::endl;
 
 	std::cout << "Creating shader module..." << std::endl;
-	const char* shaderSource = R"(
-@vertex
-fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> @builtin(position) vec4<f32> {
-	var p = vec2f(0.0, 0.0);
-	if (in_vertex_index == 0u) {
-		p = vec2f(-0.5, -0.5);
-	} else if (in_vertex_index == 1u) {
-		p = vec2f(0.5, -0.5);
-	} else {
-		p = vec2f(0.0, 0.5);
-	}
-	return vec4f(p, 0.0, 1.0);
-}
-
-@fragment
-fn fs_main() -> @location(0) vec4f {
-    return vec4f(0.0, 0.4, 1.0, 1.0);
-}
-)";
-
-	ShaderModuleDescriptor shaderDesc;
-#ifdef WEBGPU_BACKEND_WGPU
-	shaderDesc.hintCount = 0;
-	shaderDesc.hints = nullptr;
-#endif
-
-	// Use the extension mechanism to load a WGSL shader source code
-	ShaderModuleWGSLDescriptor shaderCodeDesc;
-	// Set the chained struct's header
-	shaderCodeDesc.chain.next = nullptr;
-	shaderCodeDesc.chain.sType = SType::ShaderModuleWGSLDescriptor;
-	// Connect the chain
-	shaderDesc.nextInChain = &shaderCodeDesc.chain;
-
-	// Setup the actual payload of the shader code descriptor
-	shaderCodeDesc.code = shaderSource;
-
-	ShaderModule shaderModule = device.createShaderModule(shaderDesc);
+	ShaderModule shaderModule = loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
 	std::cout << "Shader module: " << shaderModule << std::endl;
 
 	std::cout << "Creating render pipeline..." << std::endl;
 	RenderPipelineDescriptor pipelineDesc;
 
 	// Vertex fetch
-	// (We don't use any input buffer so far)
-	pipelineDesc.vertex.bufferCount = 0;
-	pipelineDesc.vertex.buffers = nullptr;
+	std::vector<VertexAttribute> vertexAttribs(2);
 
-	// Vertex shader
+	// Position attribute
+	vertexAttribs[0].shaderLocation = 0;
+	vertexAttribs[0].format = VertexFormat::Float32x2;
+	vertexAttribs[0].offset = 0;
+
+	// Color attribute
+	vertexAttribs[1].shaderLocation = 1;
+	vertexAttribs[1].format = VertexFormat::Float32x3;
+	vertexAttribs[1].offset = 2 * sizeof(float);
+
+	VertexBufferLayout vertexBufferLayout;
+	vertexBufferLayout.attributeCount = (uint32_t)vertexAttribs.size();
+	vertexBufferLayout.attributes = vertexAttribs.data();
+	vertexBufferLayout.arrayStride = 5 * sizeof(float);
+	vertexBufferLayout.stepMode = VertexStepMode::Vertex;
+
+	pipelineDesc.vertex.bufferCount = 1;
+	pipelineDesc.vertex.buffers = &vertexBufferLayout;
+
 	pipelineDesc.vertex.module = shaderModule;
 	pipelineDesc.vertex.entryPoint = "vs_main";
 	pipelineDesc.vertex.constantCount = 0;
 	pipelineDesc.vertex.constants = nullptr;
 
-	// Primitive assembly and rasterization
-	// Each sequence of 3 vertices is considered as a triangle
 	pipelineDesc.primitive.topology = PrimitiveTopology::TriangleList;
-	// We'll see later how to specify the order in which vertices should be
-	// connected. When not specified, vertices are considered sequentially.
 	pipelineDesc.primitive.stripIndexFormat = IndexFormat::Undefined;
-	// The face orientation is defined by assuming that when looking
-	// from the front of the face, its corner vertices are enumerated
-	// in the counter-clockwise (CCW) order.
 	pipelineDesc.primitive.frontFace = FrontFace::CCW;
-	// But the face orientation does not matter much because we do not
-	// cull (i.e. "hide") the faces pointing away from us (which is often
-	// used for optimization).
 	pipelineDesc.primitive.cullMode = CullMode::None;
 
-	// Fragment shader
 	FragmentState fragmentState;
 	pipelineDesc.fragment = &fragmentState;
 	fragmentState.module = shaderModule;
@@ -147,13 +158,10 @@ fn fs_main() -> @location(0) vec4f {
 	fragmentState.constantCount = 0;
 	fragmentState.constants = nullptr;
 
-	// Configure blend state
 	BlendState blendState;
-	// Usual alpha blending for the color:
 	blendState.color.srcFactor = BlendFactor::SrcAlpha;
 	blendState.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
 	blendState.color.operation = BlendOperation::Add;
-	// We leave the target alpha untouched:
 	blendState.alpha.srcFactor = BlendFactor::Zero;
 	blendState.alpha.dstFactor = BlendFactor::One;
 	blendState.alpha.operation = BlendOperation::Add;
@@ -161,32 +169,109 @@ fn fs_main() -> @location(0) vec4f {
 	ColorTargetState colorTarget;
 	colorTarget.format = swapChainFormat;
 	colorTarget.blend = &blendState;
-	colorTarget.writeMask = ColorWriteMask::All; // We could write to only some of the color channels.
+	colorTarget.writeMask = ColorWriteMask::All;
 
-	// We have only one target because our render pass has only one output color
-	// attachment.
 	fragmentState.targetCount = 1;
 	fragmentState.targets = &colorTarget;
 	
-	// Depth and stencil tests are not used here
 	pipelineDesc.depthStencil = nullptr;
 
-	// Multi-sampling
-	// Samples per pixel
 	pipelineDesc.multisample.count = 1;
-	// Default value for the mask, meaning "all bits on"
 	pipelineDesc.multisample.mask = ~0u;
-	// Default value as well (irrelevant for count = 1 anyways)
 	pipelineDesc.multisample.alphaToCoverageEnabled = false;
 
-	// Pipeline layout
-	pipelineDesc.layout = nullptr;
+	// Create binding layout (don't forget to = Default)
+	BindGroupLayoutEntry bindingLayout = Default;
+	// The binding index as used in the @binding attribute in the shader
+	bindingLayout.binding = 0;
+	// The stage that needs to access this resource
+	bindingLayout.visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+	bindingLayout.buffer.type = BufferBindingType::Uniform;
+	bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
+
+	// Create a bind group layout
+	BindGroupLayoutDescriptor bindGroupLayoutDesc{};
+	bindGroupLayoutDesc.entryCount = 1;
+	bindGroupLayoutDesc.entries = &bindingLayout;
+	BindGroupLayout bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
+
+	// Create the pipeline layout
+	PipelineLayoutDescriptor layoutDesc{};
+	layoutDesc.bindGroupLayoutCount = 1;
+	layoutDesc.bindGroupLayouts = (WGPUBindGroupLayout*)&bindGroupLayout;
+	PipelineLayout layout = device.createPipelineLayout(layoutDesc);
+	pipelineDesc.layout = layout;
 
 	RenderPipeline pipeline = device.createRenderPipeline(pipelineDesc);
 	std::cout << "Render pipeline: " << pipeline << std::endl;
 
+	std::vector<float> pointData;
+	std::vector<uint16_t> indexData;
+
+	bool success = loadGeometry(RESOURCE_DIR "/webgpu.txt", pointData, indexData);
+	if (!success) {
+		std::cerr << "Could not load geometry!" << std::endl;
+		return 1;
+	}
+
+	// Create vertex buffer
+	BufferDescriptor bufferDesc;
+	bufferDesc.size = pointData.size() * sizeof(float);
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex;
+	bufferDesc.mappedAtCreation = false;
+	Buffer vertexBuffer = device.createBuffer(bufferDesc);
+	queue.writeBuffer(vertexBuffer, 0, pointData.data(), bufferDesc.size);
+
+	int indexCount = static_cast<int>(indexData.size());
+	
+	// Create index buffer
+	bufferDesc.size = indexData.size() * sizeof(float);
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Index;
+	bufferDesc.mappedAtCreation = false;
+	Buffer indexBuffer = device.createBuffer(bufferDesc);
+	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
+
+	// Create uniform buffer
+	// The buffer will only contain 1 float with the value of uTime
+	bufferDesc.size = sizeof(MyUniforms);
+	// Make sure to flag the buffer as BufferUsage::Uniform
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform;
+	bufferDesc.mappedAtCreation = false;
+	Buffer uniformBuffer = device.createBuffer(bufferDesc);
+
+	// Upload the initial value of the uniforms
+	MyUniforms uniforms;
+	uniforms.time = 1.0f;
+	uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
+	queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
+
+	// Create a binding
+	BindGroupEntry binding{};
+	// The index of the binding (the entries in bindGroupDesc can be in any order)
+	binding.binding = 0;
+	// The buffer it is actually bound to
+	binding.buffer = uniformBuffer;
+	// We can specify an offset within the buffer, so that a single buffer can hold
+	// multiple uniform blocks.
+	binding.offset = 0;
+	// And we specify again the size of the buffer.
+	binding.size = sizeof(MyUniforms);
+
+	// A bind group contains one or multiple bindings
+	BindGroupDescriptor bindGroupDesc;
+	bindGroupDesc.layout = bindGroupLayout;
+	// There must be as many bindings as declared in the layout!
+	bindGroupDesc.entryCount = bindGroupLayoutDesc.entryCount;
+	bindGroupDesc.entries = &binding;
+	BindGroup bindGroup = device.createBindGroup(bindGroupDesc);
+
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
+
+		// Update uniform buffer
+		uniforms.time = static_cast<float>(glfwGetTime()); // glfwGetTime returns a double
+		// Only update the 1-st float of the buffer
+		queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, time), &uniforms.time, sizeof(MyUniforms::time));
 
 		TextureView nextTexture = swapChain.getCurrentTextureView();
 		if (!nextTexture) {
@@ -198,14 +283,14 @@ fn fs_main() -> @location(0) vec4f {
 		commandEncoderDesc.label = "Command Encoder";
 		CommandEncoder encoder = device.createCommandEncoder(commandEncoderDesc);
 		
-		RenderPassDescriptor renderPassDesc;
+		RenderPassDescriptor renderPassDesc{};
 
-		RenderPassColorAttachment renderPassColorAttachment;
+		RenderPassColorAttachment renderPassColorAttachment{};
 		renderPassColorAttachment.view = nextTexture;
 		renderPassColorAttachment.resolveTarget = nullptr;
 		renderPassColorAttachment.loadOp = LoadOp::Clear;
 		renderPassColorAttachment.storeOp = StoreOp::Store;
-		renderPassColorAttachment.clearValue = Color{ 0.9, 0.1, 0.2, 1.0 };
+		renderPassColorAttachment.clearValue = Color{ 0.05, 0.05, 0.05, 1.0 };
 		renderPassDesc.colorAttachmentCount = 1;
 		renderPassDesc.colorAttachments = &renderPassColorAttachment;
 
@@ -214,23 +299,36 @@ fn fs_main() -> @location(0) vec4f {
 		renderPassDesc.timestampWrites = nullptr;
 		RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
 
-		// In its overall outline, drawing a triangle is as simple as this:
-		// Select which render pipeline to use
 		renderPass.setPipeline(pipeline);
-		// Draw 1 instance of a 3-vertices shape
-		renderPass.draw(3, 1, 0, 0);
+
+		renderPass.setVertexBuffer(0, vertexBuffer, 0, pointData.size() * sizeof(float));
+		renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexData.size() * sizeof(uint16_t));
+
+		// Set binding group
+		renderPass.setBindGroup(0, bindGroup, 0, nullptr);
+
+		renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
 		renderPass.end();
 		
 		nextTexture.release();
 
-		CommandBufferDescriptor cmdBufferDescriptor;
+		CommandBufferDescriptor cmdBufferDescriptor{};
 		cmdBufferDescriptor.label = "Command buffer";
 		CommandBuffer command = encoder.finish(cmdBufferDescriptor);
 		queue.submit(command);
 
 		swapChain.present();
+#ifdef WEBGPU_BACKEND_DAWN
+		// Check for pending error callbacks
+		device.tick();
+#endif
 	}
+
+	vertexBuffer.destroy();
+	vertexBuffer.release();
+	indexBuffer.destroy();
+	indexBuffer.release();
 
 	swapChain.release();
 	device.release();
@@ -240,4 +338,79 @@ fn fs_main() -> @location(0) vec4f {
 	glfwTerminate();
 
 	return 0;
+}
+
+ShaderModule loadShaderModule(const fs::path& path, Device device) {
+	std::ifstream file(path);
+	if (!file.is_open()) {
+		return nullptr;
+	}
+	file.seekg(0, std::ios::end);
+	size_t size = file.tellg();
+	std::string shaderSource(size, ' ');
+	file.seekg(0);
+	file.read(shaderSource.data(), size);
+
+	ShaderModuleWGSLDescriptor shaderCodeDesc;
+	shaderCodeDesc.chain.next = nullptr;
+	shaderCodeDesc.chain.sType = SType::ShaderModuleWGSLDescriptor;
+	shaderCodeDesc.code = shaderSource.c_str();
+	ShaderModuleDescriptor shaderDesc;
+	shaderDesc.nextInChain = &shaderCodeDesc.chain;
+#ifdef WEBGPU_BACKEND_WGPU
+	shaderDesc.hintCount = 0;
+	shaderDesc.hints = nullptr;
+#endif
+
+	return device.createShaderModule(shaderDesc);
+}
+
+bool loadGeometry(const fs::path& path, std::vector<float>& pointData, std::vector<uint16_t>& indexData) {
+	std::ifstream file(path);
+	if (!file.is_open()) {
+		return false;
+	}
+
+	pointData.clear();
+	indexData.clear();
+
+	enum class Section {
+		None,
+		Points,
+		Indices,
+	};
+	Section currentSection = Section::None;
+
+	float value;
+	uint16_t index;
+	std::string line;
+	while (!file.eof()) {
+		getline(file, line);
+		if (line == "[points]") {
+			currentSection = Section::Points;
+		}
+		else if (line == "[indices]") {
+			currentSection = Section::Indices;
+		}
+		else if (line[0] == '#' || line.empty()) {
+			// Do nothing, this is a comment
+		}
+		else if (currentSection == Section::Points) {
+			std::istringstream iss(line);
+			// Get x, y, r, g, b
+			for (int i = 0; i < 5; ++i) {
+				iss >> value;
+				pointData.push_back(value);
+			}
+		}
+		else if (currentSection == Section::Indices) {
+			std::istringstream iss(line);
+			// Get corners #0 #1 and #2
+			for (int i = 0; i < 3; ++i) {
+				iss >> index;
+				indexData.push_back(index);
+			}
+		}
+	}
+	return true;
 }
