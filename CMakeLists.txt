@@ -9,6 +9,7 @@ option(DEV_MODE "Set up development helper settings" ON)
 add_subdirectory(glfw)
 add_subdirectory(webgpu)
 add_subdirectory(glfw3webgpu)
+add_subdirectory(bvh)
 add_executable(Baker
 	main.cpp
 	magic_enum.hpp
@@ -27,7 +28,7 @@ else()
 		RESOURCE_DIR="./resources"
 	)
 endif()
-target_link_libraries(Baker PRIVATE glfw webgpu glfw3webgpu)
+target_link_libraries(Baker PRIVATE glfw webgpu glfw3webgpu bvh)
 target_copy_webgpu_binaries(Baker)
 # 设定编译参数
 set_target_properties(Baker PROPERTIES CXX_STANDARD 17)  # 指定 C++ 版本
