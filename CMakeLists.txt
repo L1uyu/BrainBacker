@@ -31,5 +31,5 @@ endif()
 target_link_libraries(Baker PRIVATE glfw webgpu glfw3webgpu bvh)
 target_copy_webgpu_binaries(Baker)
 # 设定编译参数
-set_target_properties(Baker PROPERTIES CXX_STANDARD 17)  # 指定 C++ 版本
+set_target_properties(Baker PROPERTIES CXX_STANDARD 20)  # 指定 C++ 版本
 target_treat_all_warnings_as_errors(Baker)
