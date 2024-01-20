@@ -1,4 +1,4 @@
-WEBGPU Light Baker (still in progress)
+WEBGPU Light Baker (still in early progress)
 ### Quick Start
 * MacOS: open Terminal and run "bash build.sh"
 * Windows: install Git bash and run "bash build.sh"
