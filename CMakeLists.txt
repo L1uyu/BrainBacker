@@ -10,8 +10,9 @@ add_subdirectory(third_party/glfw)
 add_subdirectory(third_party/webgpu)
 add_subdirectory(third_party/glfw3webgpu)
 add_subdirectory(third_party/bvh)
+include_directories(include)
 add_executable(Baker
-	main.cpp
+	src/main.cpp
 )
 if(DEV_MODE)
 	# In dev mode, we load resources from the source tree, so that when we
@@ -36,5 +37,5 @@ target_treat_all_warnings_as_errors(Baker)
 
 if (MSVC)
 	# Disable warning C4201: nonstandard extension used: nameless struct/union
-	target_compile_options(App PUBLIC /wd4201)
+	target_compile_options(Baker PUBLIC /wd4201)
 endif (MSVC)
