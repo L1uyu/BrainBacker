@@ -1,11 +1,20 @@
-cmake_minimum_required( VERSION 3.5 )
+cmake_minimum_required( VERSION 3.20 )
+set(ENV{http_proxy} "http://127.0.0.1:7890")
+set(ENV{https_proxy} "https://127.0.0.1:7890")
 project(
 	BakerBrain
 	VERSION 0.1.0
 	LANGUAGES CXX C
 )
 include(utils.cmake)
-option(DEV_MODE "Set up development helper settings" ON)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build (Debug or Release)" FORCE)
+endif()
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(DEV_MODE ON CACHE BOOL "Set up development helper settings" FORCE)
+else()
+    set(DEV_MODE OFF CACHE BOOL "Set up development helper settings" FORCE)
+endif()
 add_subdirectory(third_party/glfw)
 add_subdirectory(third_party/webgpu)
 add_subdirectory(third_party/glfw3webgpu)
@@ -31,8 +40,8 @@ endif()
 target_include_directories(Baker PRIVATE third_party)
 target_link_libraries(Baker PRIVATE glfw webgpu glfw3webgpu bvh)
 target_copy_webgpu_binaries(Baker)
-# 设定编译参数
-set_target_properties(Baker PROPERTIES CXX_STANDARD 20)  # 指定 C++ 版本
+
+set_target_properties(Baker PROPERTIES CXX_STANDARD 20)
 target_treat_all_warnings_as_errors(Baker)
 
 if (MSVC)
