@@ -20,14 +20,14 @@ else()
     set(DEV_MODE OFF CACHE BOOL "" FORCE)
 endif()
 
-add_subdirectory(third_party/glfw)
-add_subdirectory(third_party/webgpu)
-add_subdirectory(third_party/glfw3webgpu)
-add_subdirectory(third_party/bvh)
+add_subdirectory(External/glfw)
+add_subdirectory(External/webgpu)
+add_subdirectory(External/glfw3webgpu)
+add_subdirectory(External/bvh)
 include_directories(include)
 
 add_executable(Baker
-	src/main.cpp
+	Source/main.cpp
 )
 
 if(DEV_MODE)
@@ -35,17 +35,17 @@ if(DEV_MODE)
 	# dynamically edit resources (like shaders), these are correctly
 	# versionned.
 	target_compile_definitions(Baker PRIVATE
-		RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources"
+		RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Resources"
 	)
 else()
 	# In release mode, we just load resources relatively to wherever the
 	# executable is launched from, so that the binary is portable
 	target_compile_definitions(Baker PRIVATE
-		RESOURCE_DIR="./resources"
+		RESOURCE_DIR="./Resources"
 	)
 endif()
 
-target_include_directories(Baker PRIVATE third_party)
+target_include_directories(Baker PRIVATE External)
 target_link_libraries(Baker PRIVATE glfw webgpu glfw3webgpu bvh)
 target_copy_webgpu_binaries(Baker)
 
