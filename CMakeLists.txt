@@ -1,10 +1,9 @@
 cmake_minimum_required( VERSION 3.20 )
 
 set(ENV{http_proxy} "http://127.0.0.1:7890")
-set(ENV{https_proxy} "https://127.0.0.1:7890")
-
+set(ENV{https_proxy} "http://127.0.0.1:7890")
 project(
-	BakerBrain
+	LightChef
 	VERSION 0.1.1
 	LANGUAGES CXX C
 )
