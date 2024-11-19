@@ -13,34 +13,30 @@ include("${CMAKE_INCLUDE_DIR}/utils.cmake")
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build (Debug or Release)" FORCE)
 endif()
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(DEV_MODE ON CACHE BOOL "Set up development helper settings" FORCE)
-else()
-    set(DEV_MODE OFF CACHE BOOL "" FORCE)
-endif()
+
 
 add_subdirectory(External/glfw)
 add_subdirectory(External/webgpu)
 add_subdirectory(External/glfw3webgpu)
 add_subdirectory(External/bvh)
-include_directories(include)
+include_directories(Include)
 
 add_executable(Baker
 	Source/main.cpp
 )
 
-if(DEV_MODE)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 	# In dev mode, we load resources from the source tree, so that when we
 	# dynamically edit resources (like shaders), these are correctly
 	# versionned.
 	target_compile_definitions(Baker PRIVATE
-		RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Resources"
+		RESOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Assets"
 	)
 else()
 	# In release mode, we just load resources relatively to wherever the
 	# executable is launched from, so that the binary is portable
 	target_compile_definitions(Baker PRIVATE
-		RESOURCE_DIR="./Resources"
+		RESOURCE_DIR="./Assets"
 	)
 endif()
 

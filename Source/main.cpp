@@ -10,7 +10,7 @@
 #include <webgpu/webgpu.hpp>
 
 #define TINYOBJLOADER_IMPLEMENTATION // add this to exactly 1 of your C++ files
-#include "tiny_obj_loader.h"
+#include "Utility/tiny_obj_loader.h"
 
 #ifndef RESOURCE_DIR
 #define RESOURCE_DIR "."  // Default fallback value
