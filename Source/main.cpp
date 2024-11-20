@@ -1,194 +1,375 @@
-#include <glfw3webgpu.h>
-#include <GLFW/glfw3.h>
-
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
-#define GLM_FORCE_LEFT_HANDED
-#include <glm/glm.hpp> // all types inspired from GLSL
-#include <glm/ext.hpp>
-
+// Include the C++ wrapper instead of the raw header(s)
 #define WEBGPU_CPP_IMPLEMENTATION
 #include <webgpu/webgpu.hpp>
 
-#define TINYOBJLOADER_IMPLEMENTATION // add this to exactly 1 of your C++ files
-#include "Utility/tiny_obj_loader.h"
+#include <GLFW/glfw3.h>
+#include <glfw3webgpu.h>
 
-#ifndef RESOURCE_DIR
-#define RESOURCE_DIR "."  // Default fallback value
-#endif
+#ifdef __EMSCRIPTEN__
+#  include <emscripten.h>
+#endif // __EMSCRIPTEN__
 
 #include <iostream>
 #include <cassert>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-#include <string>
+#include <vector>
 #include <array>
 
+#include "ResourceManager.h"
+
 using namespace wgpu;
-namespace fs = std::filesystem;
-using glm::mat4x4;
-using glm::vec4;
-using glm::vec3;
 
-constexpr float PI = 3.14159265358979323846f;
+class Application {
+public:
+	// Initialize everything and return true if it went all right
+	bool Initialize();
 
-/**
- * The same structure as in the shader, replicated in C++
- */
-struct MyUniforms {
-	// We add transform matrices
-    mat4x4 projectionMatrix;
-    mat4x4 viewMatrix;
-    mat4x4 modelMatrix;
-    std::array<float, 4> color;
-    float time;
-    float _pad[3];
+	// Uninitialize everything that was initialized
+	void Terminate();
+
+	// Draw a frame and handle events
+	void MainLoop();
+
+	// Return true as long as the main loop should keep on running
+	bool IsRunning();
+
+private:
+	// Internal structures
+	/**
+	 * The same structure as in the shader, replicated in C++
+	 */
+	struct MyUniforms {
+		std::array<float, 4> color;  // or float color[4]
+		float time;
+		float _pad[3];
+	};
+	// Have the compiler check byte alignment
+	static_assert(sizeof(MyUniforms) % 16 == 0);
+
+private:
+	TextureView GetNextSurfaceTextureView();
+
+	// Substep of Initialize() that creates the render pipeline
+	void InitializePipeline();
+	RequiredLimits GetRequiredLimits(Adapter adapter) const;
+	void InitializeBuffers();
+	void InitializeBindGroups();
+
+private:
+	// We put here all the variables that are shared between init and main loop
+	GLFWwindow *window;
+	Device device;
+	Queue queue;
+	Surface surface;
+	std::unique_ptr<ErrorCallback> uncapturedErrorCallbackHandle;
+	TextureFormat surfaceFormat = TextureFormat::Undefined;
+	RenderPipeline pipeline;
+	Buffer pointBuffer;
+	Buffer indexBuffer;
+	Buffer uniformBuffer;
+	uint32_t indexCount;
+	BindGroup bindGroup;
+	PipelineLayout layout;
+	BindGroupLayout bindGroupLayout;
 };
 
-/**
- * A structure that describes the data layout in the vertex buffer
- * We do not instantiate it but use it in `sizeof` and `offsetof`
- */
-struct VertexAttributes {
-	vec3 position;
-	vec3 normal;
-	vec3 color;
-};
+int main() {
+	Application app;
 
-// Have the compiler check byte alignment
-static_assert(sizeof(MyUniforms) % 16 == 0);
-
-ShaderModule loadShaderModule(const fs::path& path, Device device);
-// New loading procedure
-bool loadGeometryFromObj(const fs::path& path, std::vector<VertexAttributes>& vertexData);
-
-int main (int, char**) {
-	Instance instance = createInstance(InstanceDescriptor{});
-	if (!instance) {
-		std::cerr << "Could not initialize WebGPU!" << std::endl;
+	if (!app.Initialize()) {
 		return 1;
 	}
 
-	if (!glfwInit()) {
-		std::cerr << "Could not initialize GLFW!" << std::endl;
-		return 1;
+#ifdef __EMSCRIPTEN__
+	// Equivalent of the main loop when using Emscripten:
+	auto callback = [](void *arg) {
+		Application* pApp = reinterpret_cast<Application*>(arg);
+		pApp->MainLoop(); // 4. We can use the application object
+	};
+	emscripten_set_main_loop_arg(callback, &app, 0, true);
+#else // __EMSCRIPTEN__
+	while (app.IsRunning()) {
+		app.MainLoop();
 	}
+#endif // __EMSCRIPTEN__
 
+	app.Terminate();
+
+	return 0;
+}
+
+bool Application::Initialize() {
+	// Open window
+	glfwInit();
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-	GLFWwindow* window = glfwCreateWindow(640, 480, "LightChef", NULL, NULL);
-	if (!window) {
-		std::cerr << "Could not open window!" << std::endl;
-		return 1;
-	}
-
+	window = glfwCreateWindow(640, 480, "Learn WebGPU", nullptr, nullptr);
+	
+	Instance instance = wgpuCreateInstance(nullptr);
+	
+	// Get adapter
 	std::cout << "Requesting adapter..." << std::endl;
-	Surface surface = glfwGetWGPUSurface(instance, window);
-	RequestAdapterOptions adapterOpts{};
+	surface = glfwGetWGPUSurface(instance, window);
+	RequestAdapterOptions adapterOpts = {};
 	adapterOpts.compatibleSurface = surface;
 	Adapter adapter = instance.requestAdapter(adapterOpts);
 	std::cout << "Got adapter: " << adapter << std::endl;
-
-	SupportedLimits supportedLimits;
-	adapter.getLimits(&supportedLimits);
-
+	
+	instance.release();
+	
 	std::cout << "Requesting device..." << std::endl;
-	RequiredLimits requiredLimits = Default;
-	requiredLimits.limits.maxVertexAttributes = 3;
-	requiredLimits.limits.maxVertexBuffers = 1;
-	// Update max buffer size to allow up to 10000 vertices in the loaded file:
-	requiredLimits.limits.maxBufferSize = 10000 * sizeof(VertexAttributes);
-	requiredLimits.limits.maxVertexBufferArrayStride = sizeof(VertexAttributes);
-	requiredLimits.limits.minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment;
-	requiredLimits.limits.minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment;
-	requiredLimits.limits.maxInterStageShaderComponents = 6;
-	requiredLimits.limits.maxBindGroups = 1;
-	requiredLimits.limits.maxUniformBuffersPerShaderStage = 1;
-	requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4 * sizeof(float);
-	requiredLimits.limits.maxTextureDimension1D = 480;
-	requiredLimits.limits.maxTextureDimension2D = 640;
-	requiredLimits.limits.maxTextureArrayLayers = 1;
-
-	DeviceDescriptor deviceDesc;
+	DeviceDescriptor deviceDesc = {};
 	deviceDesc.label = "My Device";
-	deviceDesc.requiredFeaturesCount = 0;
-	deviceDesc.requiredLimits = &requiredLimits;
+	deviceDesc.requiredFeatureCount = 0;
+	deviceDesc.requiredLimits = nullptr;
+	deviceDesc.defaultQueue.nextInChain = nullptr;
 	deviceDesc.defaultQueue.label = "The default queue";
-	Device device = adapter.requestDevice(deviceDesc);
+	deviceDesc.deviceLostCallback = [](WGPUDeviceLostReason reason, char const* message, void* /* pUserData */) {
+		std::cout << "Device lost: reason " << reason;
+		if (message) std::cout << " (" << message << ")";
+		std::cout << std::endl;
+	};
+	// Before adapter.requestDevice(deviceDesc)
+	RequiredLimits requiredLimits = GetRequiredLimits(adapter);
+	deviceDesc.requiredLimits = &requiredLimits;
+	device = adapter.requestDevice(deviceDesc);
 	std::cout << "Got device: " << device << std::endl;
 
-	// Add an error callback for more debug info
-	auto h = device.setUncapturedErrorCallback([](ErrorType type, char const* message) {
-		std::cout << "Device error: type " << type;
-		if (message) std::cout << " (message: " << message << ")";
+	// Device error callback
+	uncapturedErrorCallbackHandle = device.setUncapturedErrorCallback([](ErrorType type, char const* message) {
+		std::cout << "Uncaptured device error: type " << type;
+		if (message) std::cout << " (" << message << ")";
 		std::cout << std::endl;
 	});
+	
+	queue = device.getQueue();
 
-	Queue queue = device.getQueue();
+	// Configure the surface
+	SurfaceConfiguration config = {};
+	
+	// Configuration of the textures created for the underlying swap chain
+	config.width = 640;
+	config.height = 480;
+	config.usage = TextureUsage::RenderAttachment;
+	surfaceFormat = surface.getPreferredFormat(adapter);
+	config.format = surfaceFormat;
 
-	std::cout << "Creating swapchain..." << std::endl;
-#ifdef WEBGPU_BACKEND_WGPU
-	TextureFormat swapChainFormat = surface.getPreferredFormat(adapter);
-#else
-	TextureFormat swapChainFormat = TextureFormat::BGRA8Unorm;
+	// And we do not need any particular view format:
+	config.viewFormatCount = 0;
+	config.viewFormats = nullptr;
+	config.device = device;
+	config.presentMode = PresentMode::Fifo;
+	config.alphaMode = CompositeAlphaMode::Auto;
+
+	surface.configure(config);
+
+	// Release the adapter only after it has been fully utilized
+	adapter.release();
+
+	InitializePipeline();
+	InitializeBuffers();
+	InitializeBindGroups();
+	return true;
+}
+
+void Application::Terminate() {
+	bindGroup.release();
+	layout.release();
+	bindGroupLayout.release();
+	uniformBuffer.release();
+	pointBuffer.release();
+	indexBuffer.release();
+	pipeline.release();
+	surface.unconfigure();
+	queue.release();
+	surface.release();
+	device.release();
+	glfwDestroyWindow(window);
+	glfwTerminate();
+}
+
+void Application::MainLoop() {
+	glfwPollEvents();
+
+	// Update uniform buffer
+	float time = static_cast<float>(glfwGetTime());
+	// Only update the 1-st float of the buffer
+	queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, time), &time, sizeof(float));
+
+	// Get the next target texture view
+	TextureView targetView = GetNextSurfaceTextureView();
+	if (!targetView) return;
+
+	// Create a command encoder for the draw call
+	CommandEncoderDescriptor encoderDesc = {};
+	encoderDesc.label = "My command encoder";
+	CommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &encoderDesc);
+
+	// Create the render pass that clears the screen with our color
+	RenderPassDescriptor renderPassDesc = {};
+
+	// The attachment part of the render pass descriptor describes the target texture of the pass
+	RenderPassColorAttachment renderPassColorAttachment = {};
+	renderPassColorAttachment.view = targetView;
+	renderPassColorAttachment.resolveTarget = nullptr;
+	renderPassColorAttachment.loadOp = LoadOp::Clear;
+	renderPassColorAttachment.storeOp = StoreOp::Store;
+	renderPassColorAttachment.clearValue = WGPUColor{ 0.05, 0.05, 0.05, 1.0 };
+#ifndef WEBGPU_BACKEND_WGPU
+	renderPassColorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+#endif // NOT WEBGPU_BACKEND_WGPU
+
+	renderPassDesc.colorAttachmentCount = 1;
+	renderPassDesc.colorAttachments = &renderPassColorAttachment;
+	renderPassDesc.depthStencilAttachment = nullptr;
+	renderPassDesc.timestampWrites = nullptr;
+
+	RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
+
+	// Select which render pipeline to use
+	renderPass.setPipeline(pipeline);
+
+	// Set vertex buffer while encoding the render pass
+	renderPass.setVertexBuffer(0, pointBuffer, 0, pointBuffer.getSize());
+	
+	// The second argument must correspond to the choice of uint16_t or uint32_t
+	// we've done when creating the index buffer.
+	renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexBuffer.getSize());
+
+	// Set binding group here!
+	renderPass.setBindGroup(0, bindGroup, 0, nullptr);
+
+	// Replace `draw()` with `drawIndexed()` and `vertexCount` with `indexCount`
+	// The extra argument is an offset within the index buffer.
+	renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
+
+	renderPass.end();
+	renderPass.release();
+
+	// Finally encode and submit the render pass
+	CommandBufferDescriptor cmdBufferDescriptor = {};
+	cmdBufferDescriptor.label = "Command buffer";
+	CommandBuffer command = encoder.finish(cmdBufferDescriptor);
+	encoder.release();
+
+	std::cout << "Submitting command..." << std::endl;
+	queue.submit(1, &command);
+	command.release();
+	std::cout << "Command submitted." << std::endl;
+
+	// At the end of the frame
+	targetView.release();
+#ifndef __EMSCRIPTEN__
+	surface.present();
 #endif
-	SwapChainDescriptor swapChainDesc;
-	swapChainDesc.width = 640;
-	swapChainDesc.height = 480;
-	swapChainDesc.usage = TextureUsage::RenderAttachment;
-	swapChainDesc.format = swapChainFormat;
-	swapChainDesc.presentMode = PresentMode::Fifo;
-	SwapChain swapChain = device.createSwapChain(surface, swapChainDesc);
-	std::cout << "Swapchain: " << swapChain << std::endl;
 
+#if defined(WEBGPU_BACKEND_DAWN)
+	device.tick();
+#elif defined(WEBGPU_BACKEND_WGPU)
+	device.poll(false);
+#endif
+}
+
+bool Application::IsRunning() {
+	return !glfwWindowShouldClose(window);
+}
+
+TextureView Application::GetNextSurfaceTextureView() {
+	// Get the surface texture
+	SurfaceTexture surfaceTexture;
+	surface.getCurrentTexture(&surfaceTexture);
+	if (surfaceTexture.status != SurfaceGetCurrentTextureStatus::Success) {
+		return nullptr;
+	}
+	Texture texture = surfaceTexture.texture;
+
+	// Create a view for this surface texture
+	TextureViewDescriptor viewDescriptor;
+	viewDescriptor.label = "Surface texture view";
+	viewDescriptor.format = texture.getFormat();
+	viewDescriptor.dimension = TextureViewDimension::_2D;
+	viewDescriptor.baseMipLevel = 0;
+	viewDescriptor.mipLevelCount = 1;
+	viewDescriptor.baseArrayLayer = 0;
+	viewDescriptor.arrayLayerCount = 1;
+	viewDescriptor.aspect = TextureAspect::All;
+	TextureView targetView = texture.createView(viewDescriptor);
+
+#ifndef WEBGPU_BACKEND_WGPU
+	// We no longer need the texture, only its view
+	// (NB: with wgpu-native, surface textures must not be manually released)
+	Texture(surfaceTexture.texture).release();
+#endif // WEBGPU_BACKEND_WGPU
+
+	return targetView;
+}
+
+void Application::InitializePipeline() {
 	std::cout << "Creating shader module..." << std::endl;
-	ShaderModule shaderModule = loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
+	ShaderModule shaderModule = ResourceManager::loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
 	std::cout << "Shader module: " << shaderModule << std::endl;
 
-	std::cout << "Creating render pipeline..." << std::endl;
+	// Check for errors
+	if (shaderModule == nullptr) {
+		std::cerr << "Could not load shader!" << std::endl;
+		exit(1);
+	}
+
+	// Create the render pipeline
 	RenderPipelineDescriptor pipelineDesc;
 
-	// Vertex fetch
-	std::vector<VertexAttribute> vertexAttribs(3);
-	//                                         ^ This was a 2
-
-	// Position attribute
-	vertexAttribs[0].shaderLocation = 0;
-	vertexAttribs[0].format = VertexFormat::Float32x3;
+	// Configure the vertex pipeline
+	// We use one vertex buffer
+	VertexBufferLayout vertexBufferLayout;
+	// We now have 2 attributes
+	std::vector<VertexAttribute> vertexAttribs(2);
+	
+	// Describe the position attribute
+	vertexAttribs[0].shaderLocation = 0; // @location(0)
+	vertexAttribs[0].format = VertexFormat::Float32x2;
 	vertexAttribs[0].offset = 0;
 
-	// Normal attribute
-	vertexAttribs[1].shaderLocation = 1;
-	vertexAttribs[1].format = VertexFormat::Float32x3;
-	vertexAttribs[1].offset = offsetof(VertexAttributes, normal);
-
-	// Color attribute
-	vertexAttribs[2].shaderLocation = 2;
-	vertexAttribs[2].format = VertexFormat::Float32x3;
-	vertexAttribs[2].offset = offsetof(VertexAttributes, color);
-
-	VertexBufferLayout vertexBufferLayout;
-	vertexBufferLayout.attributeCount = (uint32_t)vertexAttribs.size();
+	// Describe the color attribute
+	vertexAttribs[1].shaderLocation = 1; // @location(1)
+	vertexAttribs[1].format = VertexFormat::Float32x3; // different type!
+	vertexAttribs[1].offset = 2 * sizeof(float); // non null offset!
+	
+	vertexBufferLayout.attributeCount = static_cast<uint32_t>(vertexAttribs.size());
 	vertexBufferLayout.attributes = vertexAttribs.data();
-	vertexBufferLayout.arrayStride = sizeof(VertexAttributes);
-	//                               ^^^^^^^^^^^^^^^^^^^^^^^^ This was 6 * sizeof(float)
+	
+	vertexBufferLayout.arrayStride = 5 * sizeof(float);
 	vertexBufferLayout.stepMode = VertexStepMode::Vertex;
-
+	
 	pipelineDesc.vertex.bufferCount = 1;
 	pipelineDesc.vertex.buffers = &vertexBufferLayout;
 
+	// NB: We define the 'shaderModule' in the second part of this chapter.
+	// Here we tell that the programmable vertex shader stage is described
+	// by the function called 'vs_main' in that module.
 	pipelineDesc.vertex.module = shaderModule;
 	pipelineDesc.vertex.entryPoint = "vs_main";
 	pipelineDesc.vertex.constantCount = 0;
 	pipelineDesc.vertex.constants = nullptr;
 
+	// Each sequence of 3 vertices is considered as a triangle
 	pipelineDesc.primitive.topology = PrimitiveTopology::TriangleList;
+	
+	// We'll see later how to specify the order in which vertices should be
+	// connected. When not specified, vertices are considered sequentially.
 	pipelineDesc.primitive.stripIndexFormat = IndexFormat::Undefined;
+	
+	// The face orientation is defined by assuming that when looking
+	// from the front of the face, its corner vertices are enumerated
+	// in the counter-clockwise (CCW) order.
 	pipelineDesc.primitive.frontFace = FrontFace::CCW;
+	
+	// But the face orientation does not matter much because we do not
+	// cull (i.e. "hide") the faces pointing away from us (which is often
+	// used for optimization).
 	pipelineDesc.primitive.cullMode = CullMode::None;
 
+	// We tell that the programmable fragment shader stage is described
+	// by the function called 'fs_main' in the shader module.
 	FragmentState fragmentState;
-	pipelineDesc.fragment = &fragmentState;
 	fragmentState.module = shaderModule;
 	fragmentState.entryPoint = "fs_main";
 	fragmentState.constantCount = 0;
@@ -201,340 +382,170 @@ int main (int, char**) {
 	blendState.alpha.srcFactor = BlendFactor::Zero;
 	blendState.alpha.dstFactor = BlendFactor::One;
 	blendState.alpha.operation = BlendOperation::Add;
-
+	
 	ColorTargetState colorTarget;
-	colorTarget.format = swapChainFormat;
+	colorTarget.format = surfaceFormat;
 	colorTarget.blend = &blendState;
-	colorTarget.writeMask = ColorWriteMask::All;
-
+	colorTarget.writeMask = ColorWriteMask::All; // We could write to only some of the color channels.
+	
+	// We have only one target because our render pass has only one output color
+	// attachment.
 	fragmentState.targetCount = 1;
 	fragmentState.targets = &colorTarget;
+	pipelineDesc.fragment = &fragmentState;
 
-	DepthStencilState depthStencilState = Default;
-	depthStencilState.depthCompare = CompareFunction::Less;
-	depthStencilState.depthWriteEnabled = true;
-	TextureFormat depthTextureFormat = TextureFormat::Depth24Plus;
-	depthStencilState.format = depthTextureFormat;
-	depthStencilState.stencilReadMask = 0;
-	depthStencilState.stencilWriteMask = 0;
-	
-	pipelineDesc.depthStencil = &depthStencilState;
+	// We do not use stencil/depth testing for now
+	pipelineDesc.depthStencil = nullptr;
 
+	// Samples per pixel
 	pipelineDesc.multisample.count = 1;
+
+	// Default value for the mask, meaning "all bits on"
 	pipelineDesc.multisample.mask = ~0u;
+
+	// Default value as well (irrelevant for count = 1 anyways)
 	pipelineDesc.multisample.alphaToCoverageEnabled = false;
 
-	// Create binding layout (don't forget to = Default)
+	// Define binding layout (don't forget to = Default)
 	BindGroupLayoutEntry bindingLayout = Default;
+	// The binding index as used in the @binding attribute in the shader
 	bindingLayout.binding = 0;
+	// The stage that needs to access this resource
 	bindingLayout.visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+	//                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ This changed
 	bindingLayout.buffer.type = BufferBindingType::Uniform;
 	bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
+	//                                    ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
 
 	// Create a bind group layout
 	BindGroupLayoutDescriptor bindGroupLayoutDesc{};
 	bindGroupLayoutDesc.entryCount = 1;
 	bindGroupLayoutDesc.entries = &bindingLayout;
-	BindGroupLayout bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
+	bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
 
 	// Create the pipeline layout
 	PipelineLayoutDescriptor layoutDesc{};
 	layoutDesc.bindGroupLayoutCount = 1;
 	layoutDesc.bindGroupLayouts = (WGPUBindGroupLayout*)&bindGroupLayout;
-	PipelineLayout layout = device.createPipelineLayout(layoutDesc);
+	layout = device.createPipelineLayout(layoutDesc);
+
 	pipelineDesc.layout = layout;
+	
+	pipeline = device.createRenderPipeline(pipelineDesc);
 
-	RenderPipeline pipeline = device.createRenderPipeline(pipelineDesc);
-	std::cout << "Render pipeline: " << pipeline << std::endl;
+	// We no longer need to access the shader module
+	shaderModule.release();
+}
 
-	// Create the depth texture
-	TextureDescriptor depthTextureDesc;
-	depthTextureDesc.dimension = TextureDimension::_2D;
-	depthTextureDesc.format = depthTextureFormat;
-	depthTextureDesc.mipLevelCount = 1;
-	depthTextureDesc.sampleCount = 1;
-	depthTextureDesc.size = {640, 480, 1};
-	depthTextureDesc.usage = TextureUsage::RenderAttachment;
-	depthTextureDesc.viewFormatCount = 1;
-	depthTextureDesc.viewFormats = (WGPUTextureFormat*)&depthTextureFormat;
-	Texture depthTexture = device.createTexture(depthTextureDesc);
-	std::cout << "Depth texture: " << depthTexture << std::endl;
+RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
+	// Get adapter supported limits, in case we need them
+	SupportedLimits supportedLimits;
+	adapter.getLimits(&supportedLimits);
 
-	// Create the view of the depth texture manipulated by the rasterizer
-	TextureViewDescriptor depthTextureViewDesc;
-	depthTextureViewDesc.aspect = TextureAspect::DepthOnly;
-	depthTextureViewDesc.baseArrayLayer = 0;
-	depthTextureViewDesc.arrayLayerCount = 1;
-	depthTextureViewDesc.baseMipLevel = 0;
-	depthTextureViewDesc.mipLevelCount = 1;
-	depthTextureViewDesc.dimension = TextureViewDimension::_2D;
-	depthTextureViewDesc.format = depthTextureFormat;
-	TextureView depthTextureView = depthTexture.createView(depthTextureViewDesc);
-	std::cout << "Depth texture view: " << depthTextureView << std::endl;
+	// Don't forget to = Default
+	RequiredLimits requiredLimits = Default;
 
+	// We use at most 2 vertex attributes
+	requiredLimits.limits.maxVertexAttributes = 2;
+	// We should also tell that we use 1 vertex buffers
+	requiredLimits.limits.maxVertexBuffers = 1;
+	// Maximum size of a buffer is 15 vertices of 5 float each
+	requiredLimits.limits.maxBufferSize = 15 * 5 * sizeof(float);
+	// Maximum stride between 2 consecutive vertices in the vertex buffer
+	requiredLimits.limits.maxVertexBufferArrayStride = 5 * sizeof(float);
+
+	// There is a maximum of 3 float forwarded from vertex to fragment shader
+	requiredLimits.limits.maxInterStageShaderComponents = 3;
+
+	// We use at most 1 bind group for now
+	requiredLimits.limits.maxBindGroups = 1;
+	// We use at most 1 uniform buffer per stage
+	requiredLimits.limits.maxUniformBuffersPerShaderStage = 1;
+	// Uniform structs have a size of maximum 16 float (more than what we need)
+	requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4;
+
+	// These two limits are different because they are "minimum" limits,
+	// they are the only ones we are may forward from the adapter's supported
+	// limits.
+	requiredLimits.limits.minUniformBufferOffsetAlignment = supportedLimits.limits.minUniformBufferOffsetAlignment;
+	requiredLimits.limits.minStorageBufferOffsetAlignment = supportedLimits.limits.minStorageBufferOffsetAlignment;
+	return requiredLimits;
+}
+
+void Application::InitializeBuffers() {
+	// Define data vectors, but without filling them in
 	std::vector<float> pointData;
 	std::vector<uint16_t> indexData;
 
-	// Load mesh data from OBJ file
-	std::vector<VertexAttributes> vertexData;
-	bool success = loadGeometryFromObj(RESOURCE_DIR "/pyramid.obj", vertexData);
+	// Here we use the new 'loadGeometry' function:
+	bool success = ResourceManager::loadGeometry(RESOURCE_DIR "/webgpu.txt", pointData, indexData);
+
+	// Check for errors
 	if (!success) {
 		std::cerr << "Could not load geometry!" << std::endl;
-		return 1;
+		exit(1);
 	}
 
+	// We now store the index count rather than the vertex count
+	indexCount = static_cast<uint32_t>(indexData.size());
+	
 	// Create vertex buffer
 	BufferDescriptor bufferDesc;
-	bufferDesc.size = vertexData.size() * sizeof(VertexAttributes); // changed
-	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex;
+	bufferDesc.size = pointData.size() * sizeof(float);
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Vertex; // Vertex usage here!
 	bufferDesc.mappedAtCreation = false;
-	Buffer vertexBuffer = device.createBuffer(bufferDesc);
-	queue.writeBuffer(vertexBuffer, 0, vertexData.data(), bufferDesc.size); // changed
-
-	int indexCount = static_cast<int>(vertexData.size()); // changed
+	pointBuffer = device.createBuffer(bufferDesc);
 	
-	// Create uniform buffer
+	// Upload geometry data to the buffer
+	queue.writeBuffer(pointBuffer, 0, pointData.data(), bufferDesc.size);
+
+	// Create index buffer
+	// (we reuse the bufferDesc initialized for the pointBuffer)
+	bufferDesc.size = indexData.size() * sizeof(uint16_t);
+	bufferDesc.size = (bufferDesc.size + 3) & ~3; // round up to the next multiple of 4
+	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Index;
+	indexBuffer = device.createBuffer(bufferDesc);
+
+	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
+
+	// Create uniform buffer (reusing bufferDesc from other buffer creations)
+	// The buffer will only contain 1 float with the value of uTime
+	// then 3 floats left empty but needed by alignment constraints
 	bufferDesc.size = sizeof(MyUniforms);
+	//                ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
+
+	// Make sure to flag the buffer as BufferUsage::Uniform
 	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform;
+
 	bufferDesc.mappedAtCreation = false;
-	Buffer uniformBuffer = device.createBuffer(bufferDesc);
+	uniformBuffer = device.createBuffer(bufferDesc);
 
 	// Upload the initial value of the uniforms
 	MyUniforms uniforms;
-
-	// Build transform matrices
-
-	// Translate the view
-	vec3 focalPoint(0.0, 0.0, -1.0);
-	// Rotate the object
-	float angle1 = 2.0f; // arbitrary time
-	// Rotate the view point
-	float angle2 = 3.0f * PI / 4.0f;
-
-	mat4x4 S = glm::scale(mat4x4(1.0), vec3(0.3f));
-	mat4x4 T1 = mat4x4(1.0);
-	mat4x4 R1 = glm::rotate(mat4x4(1.0), angle1, vec3(0.0, 0.0, 1.0));
-	uniforms.modelMatrix = R1 * T1 * S;
-
-	mat4x4 R2 = glm::rotate(mat4x4(1.0), -angle2, vec3(1.0, 0.0, 0.0));
-	mat4x4 T2 = glm::translate(mat4x4(1.0), -focalPoint);
-	uniforms.viewMatrix = T2 * R2;
-
-	float ratio = 640.0f / 480.0f;
-	float focalLength = 2.0;
-	float near = 0.01f;
-	float far = 100.0f;
-	float divider = 1 / (focalLength * (far - near));
-	uniforms.projectionMatrix = transpose(mat4x4(
-		1.0, 0.0, 0.0, 0.0,
-		0.0, ratio, 0.0, 0.0,
-		0.0, 0.0, far * divider, -far * near * divider,
-		0.0, 0.0, 1.0 / focalLength, 0.0
-	));
-
 	uniforms.time = 1.0f;
 	uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
 	queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
+}
 
+void Application::InitializeBindGroups() {
 	// Create a binding
 	BindGroupEntry binding{};
+	// The index of the binding (the entries in bindGroupDesc can be in any order)
 	binding.binding = 0;
+	// The buffer it is actually bound to
 	binding.buffer = uniformBuffer;
+	// We can specify an offset within the buffer, so that a single buffer can hold
+	// multiple uniform blocks.
 	binding.offset = 0;
+	// And we specify again the size of the buffer.
 	binding.size = sizeof(MyUniforms);
+	//             ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
 
 	// A bind group contains one or multiple bindings
-	BindGroupDescriptor bindGroupDesc;
+	BindGroupDescriptor bindGroupDesc{};
 	bindGroupDesc.layout = bindGroupLayout;
-	bindGroupDesc.entryCount = bindGroupLayoutDesc.entryCount;
+	// There must be as many bindings as declared in the layout!
+	bindGroupDesc.entryCount = 1;
 	bindGroupDesc.entries = &binding;
-	BindGroup bindGroup = device.createBindGroup(bindGroupDesc);
-
-	while (!glfwWindowShouldClose(window)) {
-		glfwPollEvents();
-
-		// Update uniform buffer
-		uniforms.time = static_cast<float>(glfwGetTime()); // glfwGetTime returns a double
-		// Only update the 1-st float of the buffer
-		queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, time), &uniforms.time, sizeof(MyUniforms::time));
-
-		// Update view matrix
-		angle1 = uniforms.time;
-		R1 = glm::rotate(mat4x4(1.0), angle1, vec3(0.0, 0.0, 1.0));
-		uniforms.modelMatrix = R1 * T1 * S;
-		queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, modelMatrix), &uniforms.modelMatrix, sizeof(MyUniforms::modelMatrix));
-
-		TextureView nextTexture = swapChain.getCurrentTextureView();
-		if (!nextTexture) {
-			std::cerr << "Cannot acquire next swap chain texture" << std::endl;
-			return 1;
-		}
-
-		CommandEncoderDescriptor commandEncoderDesc;
-		commandEncoderDesc.label = "Command Encoder";
-		CommandEncoder encoder = device.createCommandEncoder(commandEncoderDesc);
-		
-		RenderPassDescriptor renderPassDesc{};
-
-		RenderPassColorAttachment renderPassColorAttachment{};
-		renderPassColorAttachment.view = nextTexture;
-		renderPassColorAttachment.resolveTarget = nullptr;
-		renderPassColorAttachment.loadOp = LoadOp::Clear;
-		renderPassColorAttachment.storeOp = StoreOp::Store;
-		renderPassColorAttachment.clearValue = Color{ 0.05, 0.05, 0.05, 1.0 };
-		renderPassDesc.colorAttachmentCount = 1;
-		renderPassDesc.colorAttachments = &renderPassColorAttachment;
-
-		RenderPassDepthStencilAttachment depthStencilAttachment;
-		depthStencilAttachment.view = depthTextureView;
-		depthStencilAttachment.depthClearValue = 1.0f;
-		depthStencilAttachment.depthLoadOp = LoadOp::Clear;
-		depthStencilAttachment.depthStoreOp = StoreOp::Store;
-		depthStencilAttachment.depthReadOnly = false;
-		depthStencilAttachment.stencilClearValue = 0;
-#ifdef WEBGPU_BACKEND_WGPU
-		depthStencilAttachment.stencilLoadOp = LoadOp::Clear;
-		depthStencilAttachment.stencilStoreOp = StoreOp::Store;
-#else
-		depthStencilAttachment.stencilLoadOp = LoadOp::Undefined;
-		depthStencilAttachment.stencilStoreOp = StoreOp::Undefined;
-#endif
-		depthStencilAttachment.stencilReadOnly = true;
-
-		renderPassDesc.depthStencilAttachment = &depthStencilAttachment;
-
-		renderPassDesc.timestampWriteCount = 0;
-		renderPassDesc.timestampWrites = nullptr;
-		RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
-
-		renderPass.setPipeline(pipeline);
-
-		renderPass.setVertexBuffer(0, vertexBuffer, 0, vertexData.size() * sizeof(VertexAttributes)); // changed
-
-		// Set binding group
-		renderPass.setBindGroup(0, bindGroup, 0, nullptr);
-
-		renderPass.draw(indexCount, 1, 0, 0); // changed
-
-		renderPass.end();
-		renderPass.release();
-		
-		nextTexture.release();
-
-		CommandBufferDescriptor cmdBufferDescriptor{};
-		cmdBufferDescriptor.label = "Command buffer";
-		CommandBuffer command = encoder.finish(cmdBufferDescriptor);
-		encoder.release();
-		queue.submit(command);
-		command.release();
-
-		swapChain.present();
-
-#ifdef WEBGPU_BACKEND_DAWN
-		// Check for pending error callbacks
-		device.tick();
-#endif
-	}
-
-	vertexBuffer.destroy();
-	vertexBuffer.release();
-
-	// Destroy the depth texture and its view
-	depthTextureView.release();
-	depthTexture.destroy();
-	depthTexture.release();
-
-	pipeline.release();
-	shaderModule.release();
-	swapChain.release();
-	device.release();
-	adapter.release();
-	instance.release();
-	surface.release();
-	glfwDestroyWindow(window);
-	glfwTerminate();
-
-	return 0;
-}
-
-ShaderModule loadShaderModule(const fs::path& path, Device device) {
-	std::ifstream file(path);
-	if (!file.is_open()) {
-		return nullptr;
-	}
-	file.seekg(0, std::ios::end);
-	size_t size = file.tellg();
-	std::string shaderSource(size, ' ');
-	file.seekg(0);
-	file.read(shaderSource.data(), size);
-
-	ShaderModuleWGSLDescriptor shaderCodeDesc;
-	shaderCodeDesc.chain.next = nullptr;
-	shaderCodeDesc.chain.sType = SType::ShaderModuleWGSLDescriptor;
-	shaderCodeDesc.code = shaderSource.c_str();
-	ShaderModuleDescriptor shaderDesc;
-	shaderDesc.nextInChain = &shaderCodeDesc.chain;
-#ifdef WEBGPU_BACKEND_WGPU
-	shaderDesc.hintCount = 0;
-	shaderDesc.hints = nullptr;
-#endif
-
-	return device.createShaderModule(shaderDesc);
-}
-
-bool loadGeometryFromObj(const fs::path& path, std::vector<VertexAttributes>& vertexData) {
-	tinyobj::attrib_t attrib;
-	std::vector<tinyobj::shape_t> shapes;
-	std::vector<tinyobj::material_t> materials;
-
-	std::string warn;
-	std::string err;
-
-	// Call the core loading procedure of TinyOBJLoader
-	bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.string().c_str());
-
-	// Check errors
-	if (!warn.empty()) {
-		std::cout << warn << std::endl;
-	}
-
-	if (!err.empty()) {
-		std::cerr << err << std::endl;
-	}
-
-	if (!ret) {
-		return false;
-	}
-
-	// Filling in vertexData:
-	vertexData.clear();
-	for (const auto& shape : shapes) {
-		size_t offset = vertexData.size();
-		vertexData.resize(offset + shape.mesh.indices.size());
-
-		for (size_t i = 0; i < shape.mesh.indices.size(); ++i) {
-			const tinyobj::index_t& idx = shape.mesh.indices[i];
-
-			vertexData[offset + i].position = {
-				attrib.vertices[3 * idx.vertex_index + 0],
-				-attrib.vertices[3 * idx.vertex_index + 2], // Add a minus to avoid mirroring
-				attrib.vertices[3 * idx.vertex_index + 1]
-			};
-
-			// Also apply the transform to normals!!
-			vertexData[offset + i].normal = {
-				attrib.normals[3 * idx.normal_index + 0],
-				-attrib.normals[3 * idx.normal_index + 2],
-				attrib.normals[3 * idx.normal_index + 1]
-			};
-
-			vertexData[offset + i].color = {
-				attrib.colors[3 * idx.vertex_index + 0],
-				attrib.colors[3 * idx.vertex_index + 1],
-				attrib.colors[3 * idx.vertex_index + 2]
-			};
-		}
-	}
-
-	return true;
+	bindGroup = device.createBindGroup(bindGroupDesc);
 }

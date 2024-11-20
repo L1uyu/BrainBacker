@@ -1,23 +1,31 @@
+/**
+ * A structure with fields labeled with vertex attribute locations can be used
+ * as input to the entry point of a shader.
+ */
 struct VertexInput {
-	@location(0) position: vec3f,
-	@location(1) normal: vec3f, // new attribute
-	@location(2) color: vec3f,
+	@location(0) position: vec2f,
+	@location(1) color: vec3f,
 };
 
+/**
+ * A structure with fields labeled with builtins and locations can also be used
+ * as *output* of the vertex shader, which is also the input of the fragment
+ * shader.
+ */
 struct VertexOutput {
 	@builtin(position) position: vec4f,
+	// The location here does not refer to a vertex attribute, it just means
+	// that this field must be handled by the rasterizer.
+	// (It can also refer to another field of another struct that would be used
+	// as input to the fragment shader.)
 	@location(0) color: vec3f,
-	@location(1) normal: vec3f, // <--- Add a normal output
 };
 
 /**
  * A structure holding the value of our uniforms
  */
 struct MyUniforms {
-    projectionMatrix: mat4x4f,
-    viewMatrix: mat4x4f,
-    modelMatrix: mat4x4f,
-    color: vec4f,
+    color: vec4f, // <-- this is first! Because it is bigger than 'time'
     time: f32,
 };
 
@@ -26,28 +34,25 @@ struct MyUniforms {
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
-	var out: VertexOutput;
-	out.position = uMyUniforms.projectionMatrix * uMyUniforms.viewMatrix * uMyUniforms.modelMatrix * vec4f(in.position, 1.0);
-	// Forward the normal
-    out.normal = (uMyUniforms.modelMatrix * vec4f(in.normal, 0.0)).xyz;
-	out.color = in.color;
-	return out;
+    var out: VertexOutput;
+    let ratio = 640.0 / 480.0;
+
+    // We now move the scene depending on the time!
+    var offset = vec2f(-0.6875, -0.463);
+    offset += 0.3 * vec2f(cos(uMyUniforms.time), sin(uMyUniforms.time));
+
+    out.position = vec4f(in.position.x + offset.x, (in.position.y + offset.y) * ratio, 0.0, 1.0);
+    out.color = in.color;
+    return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-	let normal = normalize(in.normal);
-
-	let lightColor1 = vec3f(1.0, 0.9, 0.6);
-	let lightColor2 = vec3f(0.6, 0.9, 1.0);
-	let lightDirection1 = vec3f(0.5, -0.9, 0.1);
-	let lightDirection2 = vec3f(0.2, 0.4, 0.3);
-	let shading1 = max(0.0, dot(lightDirection1, normal));
-	let shading2 = max(0.0, dot(lightDirection2, normal));
-	let shading = shading1 * lightColor1 + shading2 * lightColor2;
-	let color = in.color * shading;
+	// We multiply the scene's color with our global uniform (this is one
+    // possible use of the color uniform, among many others).
+    let color = in.color * uMyUniforms.color.rgb;
 
 	// Gamma-correction
-	let corrected_color = pow(color, vec3f(2.2));
-	return vec4f(corrected_color, uMyUniforms.color.a);
+    let linear_color = pow(color, vec3f(2.2));
+    return vec4f(linear_color, 1.0);
 }

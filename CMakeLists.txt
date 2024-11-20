@@ -21,8 +21,12 @@ add_subdirectory(External/glfw3webgpu)
 add_subdirectory(External/bvh)
 include_directories(Include)
 
+file(GLOB_RECURSE SOURCE_FILES 
+    "${CMAKE_CURRENT_SOURCE_DIR}/Source/*.cpp"
+)
+
 add_executable(Baker
-	Source/main.cpp
+	${SOURCE_FILES}
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

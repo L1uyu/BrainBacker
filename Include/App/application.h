@@ -2,6 +2,7 @@
 
 #include <memory>
 #include "window.h"
+#include "Core/gpu_context.h"
 #include "Resources/resource_manager.h"
 
 namespace LightChef
