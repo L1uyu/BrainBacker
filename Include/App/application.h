@@ -17,11 +17,12 @@ namespace LightChef
         Application(const Application&) = delete;
         Application& operator=(const Application&) = delete;
 
-        virtual void Initialize();
+        virtual bool Initialize();
         virtual void MainLoop();
         virtual void Terminate();
     protected:
-    
+        Window m_window;
+        GPUContext m_gpuContext;
     };
 
 }

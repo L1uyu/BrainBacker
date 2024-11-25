@@ -5,11 +5,13 @@ namespace LightChef
     class GPUContext
     {
     public:
-        wgpu::Instance& GetInstance();
-        wgpu::Adapter& GetAdapter(); 
-        wgpu::Surface& GetSurface();
-        wgpu::Device& GetDevice();
-        wgpu::Queue& GetQueue();
+        wgpu::Instance GetInstance();
+        wgpu::Adapter GetAdapter(); 
+        wgpu::Surface GetSurface();
+        wgpu::Device GetDevice();
+        wgpu::Queue GetQueue();
+        void SetSurface(wgpu::Surface surface);
+        wgpu::Instance CreateInstance();
     private:
         wgpu::Instance m_instance;
         wgpu::Adapter m_adapter;

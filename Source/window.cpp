@@ -20,3 +20,8 @@ wgpu::Surface Window::GetSurface(wgpu::Instance instance)
     wgpu::Surface surface = glfwGetWGPUSurface(instance, m_window);
     return surface;
 }
+
+void Window::InitSurface(GPUContext& gpuContext)
+{
+    gpuContext.SetSurface(GetSurface(gpuContext.GetInstance()));
+}

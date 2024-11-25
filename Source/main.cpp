@@ -12,7 +12,6 @@
 #include <iostream>
 #include <cassert>
 #include <vector>
-#include <array>
 
 #include "ResourceManager.h"
 
@@ -33,26 +32,12 @@ public:
 	bool IsRunning();
 
 private:
-	// Internal structures
-	/**
-	 * The same structure as in the shader, replicated in C++
-	 */
-	struct MyUniforms {
-		std::array<float, 4> color;  // or float color[4]
-		float time;
-		float _pad[3];
-	};
-	// Have the compiler check byte alignment
-	static_assert(sizeof(MyUniforms) % 16 == 0);
-
-private:
 	TextureView GetNextSurfaceTextureView();
 
 	// Substep of Initialize() that creates the render pipeline
 	void InitializePipeline();
 	RequiredLimits GetRequiredLimits(Adapter adapter) const;
 	void InitializeBuffers();
-	void InitializeBindGroups();
 
 private:
 	// We put here all the variables that are shared between init and main loop
@@ -65,11 +50,7 @@ private:
 	RenderPipeline pipeline;
 	Buffer pointBuffer;
 	Buffer indexBuffer;
-	Buffer uniformBuffer;
 	uint32_t indexCount;
-	BindGroup bindGroup;
-	PipelineLayout layout;
-	BindGroupLayout bindGroupLayout;
 };
 
 int main() {
@@ -135,11 +116,11 @@ bool Application::Initialize() {
 	std::cout << "Got device: " << device << std::endl;
 
 	// Device error callback
-	uncapturedErrorCallbackHandle = device.setUncapturedErrorCallback([](ErrorType type, char const* message) {
-		std::cout << "Uncaptured device error: type " << type;
-		if (message) std::cout << " (" << message << ")";
-		std::cout << std::endl;
-	});
+	// uncapturedErrorCallbackHandle = device.setUncapturedErrorCallback([](ErrorType type, char const* message) {
+	// 	std::cout << "Uncaptured device error: type " << type;
+	// 	if (message) std::cout << " (" << message << ")";
+	// 	std::cout << std::endl;
+	// });
 	
 	queue = device.getQueue();
 
@@ -150,7 +131,7 @@ bool Application::Initialize() {
 	config.width = 640;
 	config.height = 480;
 	config.usage = TextureUsage::RenderAttachment;
-	surfaceFormat = surface.getPreferredFormat(adapter);
+	surfaceFormat = TextureFormat::BGRA8UnormSrgb; //surface.getPreferredFormat(adapter);
 	config.format = surfaceFormat;
 
 	// And we do not need any particular view format:
@@ -167,15 +148,10 @@ bool Application::Initialize() {
 
 	InitializePipeline();
 	InitializeBuffers();
-	InitializeBindGroups();
 	return true;
 }
 
 void Application::Terminate() {
-	bindGroup.release();
-	layout.release();
-	bindGroupLayout.release();
-	uniformBuffer.release();
 	pointBuffer.release();
 	indexBuffer.release();
 	pipeline.release();
@@ -189,11 +165,6 @@ void Application::Terminate() {
 
 void Application::MainLoop() {
 	glfwPollEvents();
-
-	// Update uniform buffer
-	float time = static_cast<float>(glfwGetTime());
-	// Only update the 1-st float of the buffer
-	queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, time), &time, sizeof(float));
 
 	// Get the next target texture view
 	TextureView targetView = GetNextSurfaceTextureView();
@@ -235,9 +206,6 @@ void Application::MainLoop() {
 	// we've done when creating the index buffer.
 	renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexBuffer.getSize());
 
-	// Set binding group here!
-	renderPass.setBindGroup(0, bindGroup, 0, nullptr);
-
 	// Replace `draw()` with `drawIndexed()` and `vertexCount` with `indexCount`
 	// The extra argument is an offset within the index buffer.
 	renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
@@ -251,10 +219,10 @@ void Application::MainLoop() {
 	CommandBuffer command = encoder.finish(cmdBufferDescriptor);
 	encoder.release();
 
-	std::cout << "Submitting command..." << std::endl;
+	//std::cout << "Submitting command..." << std::endl;
 	queue.submit(1, &command);
 	command.release();
-	std::cout << "Command submitted." << std::endl;
+	//std::cout << "Command submitted." << std::endl;
 
 	// At the end of the frame
 	targetView.release();
@@ -305,7 +273,7 @@ TextureView Application::GetNextSurfaceTextureView() {
 
 void Application::InitializePipeline() {
 	std::cout << "Creating shader module..." << std::endl;
-	ShaderModule shaderModule = ResourceManager::loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
+	WGPUShaderModule shaderModule = ResourceManager::loadShaderModule(RESOURCE_DIR "/shader.wgsl", device);
 	std::cout << "Shader module: " << shaderModule << std::endl;
 
 	// Check for errors
@@ -315,29 +283,31 @@ void Application::InitializePipeline() {
 	}
 
 	// Create the render pipeline
-	RenderPipelineDescriptor pipelineDesc;
+	WGPURenderPipelineDescriptor pipelineDesc{};
+	pipelineDesc.nextInChain = nullptr;
 
 	// Configure the vertex pipeline
 	// We use one vertex buffer
-	VertexBufferLayout vertexBufferLayout;
+	WGPUVertexBufferLayout vertexBufferLayout{};
 	// We now have 2 attributes
-	std::vector<VertexAttribute> vertexAttribs(2);
+	std::vector<WGPUVertexAttribute> vertexAttribs(2);
 	
 	// Describe the position attribute
 	vertexAttribs[0].shaderLocation = 0; // @location(0)
-	vertexAttribs[0].format = VertexFormat::Float32x2;
+	vertexAttribs[0].format = WGPUVertexFormat_Float32x2;
 	vertexAttribs[0].offset = 0;
 
 	// Describe the color attribute
 	vertexAttribs[1].shaderLocation = 1; // @location(1)
-	vertexAttribs[1].format = VertexFormat::Float32x3; // different type!
+	vertexAttribs[1].format = WGPUVertexFormat_Float32x3; // different type!
 	vertexAttribs[1].offset = 2 * sizeof(float); // non null offset!
 	
 	vertexBufferLayout.attributeCount = static_cast<uint32_t>(vertexAttribs.size());
 	vertexBufferLayout.attributes = vertexAttribs.data();
 	
 	vertexBufferLayout.arrayStride = 5 * sizeof(float);
-	vertexBufferLayout.stepMode = VertexStepMode::Vertex;
+	//                               ^^^^^^^^^^^^^^^^^ The new stride
+	vertexBufferLayout.stepMode = WGPUVertexStepMode_Vertex;
 	
 	pipelineDesc.vertex.bufferCount = 1;
 	pipelineDesc.vertex.buffers = &vertexBufferLayout;
@@ -351,21 +321,21 @@ void Application::InitializePipeline() {
 	pipelineDesc.vertex.constants = nullptr;
 
 	// Each sequence of 3 vertices is considered as a triangle
-	pipelineDesc.primitive.topology = PrimitiveTopology::TriangleList;
+	pipelineDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
 	
 	// We'll see later how to specify the order in which vertices should be
 	// connected. When not specified, vertices are considered sequentially.
-	pipelineDesc.primitive.stripIndexFormat = IndexFormat::Undefined;
+	pipelineDesc.primitive.stripIndexFormat = WGPUIndexFormat_Undefined;
 	
 	// The face orientation is defined by assuming that when looking
 	// from the front of the face, its corner vertices are enumerated
 	// in the counter-clockwise (CCW) order.
-	pipelineDesc.primitive.frontFace = FrontFace::CCW;
+	pipelineDesc.primitive.frontFace = WGPUFrontFace_CCW;
 	
 	// But the face orientation does not matter much because we do not
 	// cull (i.e. "hide") the faces pointing away from us (which is often
 	// used for optimization).
-	pipelineDesc.primitive.cullMode = CullMode::None;
+	pipelineDesc.primitive.cullMode = WGPUCullMode_None;
 
 	// We tell that the programmable fragment shader stage is described
 	// by the function called 'fs_main' in the shader module.
@@ -406,35 +376,12 @@ void Application::InitializePipeline() {
 	// Default value as well (irrelevant for count = 1 anyways)
 	pipelineDesc.multisample.alphaToCoverageEnabled = false;
 
-	// Define binding layout (don't forget to = Default)
-	BindGroupLayoutEntry bindingLayout = Default;
-	// The binding index as used in the @binding attribute in the shader
-	bindingLayout.binding = 0;
-	// The stage that needs to access this resource
-	bindingLayout.visibility = ShaderStage::Vertex | ShaderStage::Fragment;
-	//                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ This changed
-	bindingLayout.buffer.type = BufferBindingType::Uniform;
-	bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
-	//                                    ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
+	pipelineDesc.layout = nullptr;
 
-	// Create a bind group layout
-	BindGroupLayoutDescriptor bindGroupLayoutDesc{};
-	bindGroupLayoutDesc.entryCount = 1;
-	bindGroupLayoutDesc.entries = &bindingLayout;
-	bindGroupLayout = device.createBindGroupLayout(bindGroupLayoutDesc);
-
-	// Create the pipeline layout
-	PipelineLayoutDescriptor layoutDesc{};
-	layoutDesc.bindGroupLayoutCount = 1;
-	layoutDesc.bindGroupLayouts = (WGPUBindGroupLayout*)&bindGroupLayout;
-	layout = device.createPipelineLayout(layoutDesc);
-
-	pipelineDesc.layout = layout;
-	
-	pipeline = device.createRenderPipeline(pipelineDesc);
+	pipeline = wgpuDeviceCreateRenderPipeline(device, &pipelineDesc);
 
 	// We no longer need to access the shader module
-	shaderModule.release();
+	wgpuShaderModuleRelease(shaderModule);
 }
 
 RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
@@ -451,18 +398,12 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
 	requiredLimits.limits.maxVertexBuffers = 1;
 	// Maximum size of a buffer is 15 vertices of 5 float each
 	requiredLimits.limits.maxBufferSize = 15 * 5 * sizeof(float);
+	//                                    ^^ This was a 6
 	// Maximum stride between 2 consecutive vertices in the vertex buffer
 	requiredLimits.limits.maxVertexBufferArrayStride = 5 * sizeof(float);
 
 	// There is a maximum of 3 float forwarded from vertex to fragment shader
 	requiredLimits.limits.maxInterStageShaderComponents = 3;
-
-	// We use at most 1 bind group for now
-	requiredLimits.limits.maxBindGroups = 1;
-	// We use at most 1 uniform buffer per stage
-	requiredLimits.limits.maxUniformBuffersPerShaderStage = 1;
-	// Uniform structs have a size of maximum 16 float (more than what we need)
-	requiredLimits.limits.maxUniformBufferBindingSize = 16 * 4;
 
 	// These two limits are different because they are "minimum" limits,
 	// they are the only ones we are may forward from the adapter's supported
@@ -507,45 +448,5 @@ void Application::InitializeBuffers() {
 	indexBuffer = device.createBuffer(bufferDesc);
 
 	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
-
-	// Create uniform buffer (reusing bufferDesc from other buffer creations)
-	// The buffer will only contain 1 float with the value of uTime
-	// then 3 floats left empty but needed by alignment constraints
-	bufferDesc.size = sizeof(MyUniforms);
-	//                ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
-
-	// Make sure to flag the buffer as BufferUsage::Uniform
-	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform;
-
-	bufferDesc.mappedAtCreation = false;
-	uniformBuffer = device.createBuffer(bufferDesc);
-
-	// Upload the initial value of the uniforms
-	MyUniforms uniforms;
-	uniforms.time = 1.0f;
-	uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
-	queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
 }
 
-void Application::InitializeBindGroups() {
-	// Create a binding
-	BindGroupEntry binding{};
-	// The index of the binding (the entries in bindGroupDesc can be in any order)
-	binding.binding = 0;
-	// The buffer it is actually bound to
-	binding.buffer = uniformBuffer;
-	// We can specify an offset within the buffer, so that a single buffer can hold
-	// multiple uniform blocks.
-	binding.offset = 0;
-	// And we specify again the size of the buffer.
-	binding.size = sizeof(MyUniforms);
-	//             ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
-
-	// A bind group contains one or multiple bindings
-	BindGroupDescriptor bindGroupDesc{};
-	bindGroupDesc.layout = bindGroupLayout;
-	// There must be as many bindings as declared in the layout!
-	bindGroupDesc.entryCount = 1;
-	bindGroupDesc.entries = &binding;
-	bindGroup = device.createBindGroup(bindGroupDesc);
-}
