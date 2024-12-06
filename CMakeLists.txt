@@ -19,6 +19,7 @@ add_subdirectory(External/glfw)
 add_subdirectory(External/webgpu)
 add_subdirectory(External/glfw3webgpu)
 add_subdirectory(External/bvh)
+add_subdirectory(External/glm)
 include_directories(Include)
 
 file(GLOB_RECURSE SOURCE_FILES 
