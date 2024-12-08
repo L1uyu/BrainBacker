@@ -15,7 +15,7 @@
 #include <array>
 
 #include "ResourceManager.h"
-
+#include "Utility/utility.h"
 using namespace wgpu;
 
 class Application {
@@ -70,6 +70,7 @@ private:
 	PipelineLayout layout;
 	BindGroupLayout bindGroupLayout;
 	SurfaceCapabilities surfaceCapabilities;
+	uint32_t uniformStride;
 };
 
 int main() {
@@ -128,9 +129,7 @@ bool Application::Initialize() {
 		if (message) std::cout << " (" << message << ")";
 		std::cout << std::endl;
 	};
-	// Before adapter.requestDevice(deviceDesc)
-	//RequiredLimits requiredLimits = GetRequiredLimits(adapter);
-	//deviceDesc.requiredLimits = &requiredLimits;
+
 	device = adapter.requestDevice(deviceDesc);
 	std::cout << "Got device: " << device << std::endl;
 
@@ -232,6 +231,8 @@ void Application::MainLoop() {
 	// Select which render pipeline to use
 	renderPass.setPipeline(pipeline);
 
+	uint32_t dynamicOffset = 0;
+
 	// Set vertex buffer while encoding the render pass
 	renderPass.setVertexBuffer(0, pointBuffer, 0, pointBuffer.getSize());
 	
@@ -240,10 +241,8 @@ void Application::MainLoop() {
 	renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexBuffer.getSize());
 
 	// Set binding group here!
-	renderPass.setBindGroup(0, bindGroup, 0, nullptr);
-
-	// Replace `draw()` with `drawIndexed()` and `vertexCount` with `indexCount`
-	// The extra argument is an offset within the index buffer.
+	dynamicOffset = 0 * uniformStride;
+	renderPass.setBindGroup(0, bindGroup, 1, &dynamicOffset);
 	renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
 	renderPass.end();
@@ -327,18 +326,18 @@ void Application::InitializePipeline() {
 	
 	// Describe the position attribute
 	vertexAttribs[0].shaderLocation = 0; // @location(0)
-	vertexAttribs[0].format = VertexFormat::Float32x2;
+	vertexAttribs[0].format = VertexFormat::Float32x3;
 	vertexAttribs[0].offset = 0;
 
 	// Describe the color attribute
 	vertexAttribs[1].shaderLocation = 1; // @location(1)
 	vertexAttribs[1].format = VertexFormat::Float32x3; // different type!
-	vertexAttribs[1].offset = 2 * sizeof(float); // non null offset!
+	vertexAttribs[1].offset = 3 * sizeof(float); // non null offset!
 	
 	vertexBufferLayout.attributeCount = static_cast<uint32_t>(vertexAttribs.size());
 	vertexBufferLayout.attributes = vertexAttribs.data();
 	
-	vertexBufferLayout.arrayStride = 5 * sizeof(float);
+	vertexBufferLayout.arrayStride = 6 * sizeof(float);
 	vertexBufferLayout.stepMode = VertexStepMode::Vertex;
 	
 	pipelineDesc.vertex.bufferCount = 1;
@@ -418,6 +417,7 @@ void Application::InitializePipeline() {
 	bindingLayout.buffer.type = BufferBindingType::Uniform;
 	bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
 	//                                    ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
+	bindingLayout.buffer.hasDynamicOffset = true;
 
 	// Create a bind group layout
 	BindGroupLayoutDescriptor bindGroupLayoutDesc{};
@@ -446,6 +446,7 @@ RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
 
 	// Don't forget to = Default
 	RequiredLimits requiredLimits = Default;
+
 	// We use at most 2 vertex attributes
 	requiredLimits.limits.maxVertexAttributes = 2;
 	// We should also tell that we use 1 vertex buffers
@@ -479,7 +480,7 @@ void Application::InitializeBuffers() {
 	std::vector<uint16_t> indexData;
 
 	// Here we use the new 'loadGeometry' function:
-	bool success = ResourceManager::loadGeometry(RESOURCE_DIR "/webgpu.txt", pointData, indexData);
+	bool success = ResourceManager::loadGeometry(RESOURCE_DIR "/pyramid.txt", pointData, indexData, 3);
 
 	// Check for errors
 	if (!success) {
@@ -509,12 +510,13 @@ void Application::InitializeBuffers() {
 
 	queue.writeBuffer(indexBuffer, 0, indexData.data(), bufferDesc.size);
 
-	// Create uniform buffer (reusing bufferDesc from other buffer creations)
-	// The buffer will only contain 1 float with the value of uTime
-	// then 3 floats left empty but needed by alignment constraints
-	bufferDesc.size = sizeof(MyUniforms);
-	//                ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
-
+	SupportedLimits supportedLimits;
+	device.getLimits(&supportedLimits);
+	uniformStride = LightChef::ceilToNextMultiple(
+		(uint32_t)sizeof(MyUniforms),
+		(uint32_t)supportedLimits.limits.minUniformBufferOffsetAlignment
+	);
+	bufferDesc.size = uniformStride + sizeof(MyUniforms);
 	// Make sure to flag the buffer as BufferUsage::Uniform
 	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform;
 
@@ -526,6 +528,11 @@ void Application::InitializeBuffers() {
 	uniforms.time = 1.0f;
 	uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
 	queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
+
+// Upload second value
+	uniforms.time = -1.0f;
+	uniforms.color = { 1.0f, 1.0f, 1.0f, 0.7f };
+	queue.writeBuffer(uniformBuffer, uniformStride, &uniforms, sizeof(MyUniforms));
 }
 
 void Application::InitializeBindGroups() {
