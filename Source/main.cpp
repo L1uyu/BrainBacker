@@ -5,6 +5,8 @@
 #include <GLFW/glfw3.h>
 #include <glfw3webgpu.h>
 
+#include <glm/glm.hpp>
+
 #ifdef __EMSCRIPTEN__
 #  include <emscripten.h>
 #endif // __EMSCRIPTEN__
@@ -51,16 +53,20 @@ private:
 	// Substep of Initialize() that creates the render pipeline
 	void InitializePipeline();
 	RequiredLimits GetRequiredLimits(Adapter adapter) const;
+	void InitializeTextures();
 	void InitializeBuffers();
 	void InitializeBindGroups();
 
 private:
 	// We put here all the variables that are shared between init and main loop
 	GLFWwindow *window;
+	unsigned int width = 640;
+	unsigned int height = 480;
 	Device device;
 	Queue queue;
 	Surface surface;
 	TextureFormat surfaceFormat = TextureFormat::Undefined;
+	TextureFormat depthTextureFormat = TextureFormat::Undefined;
 	RenderPipeline pipeline;
 	Buffer pointBuffer;
 	Buffer indexBuffer;
@@ -71,6 +77,8 @@ private:
 	BindGroupLayout bindGroupLayout;
 	SurfaceCapabilities surfaceCapabilities;
 	uint32_t uniformStride;
+	Texture depthTexture;
+	TextureView depthTextureView;
 };
 
 int main() {
@@ -103,7 +111,7 @@ bool Application::Initialize() {
 	glfwInit();
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-	window = glfwCreateWindow(640, 480, "Learn WebGPU", nullptr, nullptr);
+	window = glfwCreateWindow(width, height, "Learn WebGPU", nullptr, nullptr);
 	
 	Instance instance = wgpuCreateInstance(nullptr);
 	
@@ -149,8 +157,8 @@ bool Application::Initialize() {
 	SurfaceConfiguration config = {};
 	
 	// Configuration of the textures created for the underlying swap chain
-	config.width = 640;
-	config.height = 480;
+	config.width = width;
+	config.height = height;
 	config.usage = TextureUsage::RenderAttachment;
 	surfaceFormat = surfaceCapabilities.formats[0]; //surface.getPreferredFormat(adapter);
 	config.format = surfaceFormat;
@@ -168,6 +176,7 @@ bool Application::Initialize() {
 	adapter.release();
 
 	InitializePipeline();
+	InitializeTextures();
 	InitializeBuffers();
 	InitializeBindGroups();
 	return true;
@@ -181,6 +190,9 @@ void Application::Terminate() {
 	pointBuffer.release();
 	indexBuffer.release();
 	pipeline.release();
+	depthTextureView.release();
+	depthTexture.destroy();
+	depthTexture.release();
 	surface.unconfigure();
 	surfaceCapabilities.freeMembers();
 	queue.release();
@@ -221,9 +233,21 @@ void Application::MainLoop() {
 	renderPassColorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
 #endif // NOT WEBGPU_BACKEND_WGPU
 
+	RenderPassDepthStencilAttachment depthStencilAttachment = {};
+	depthStencilAttachment.view = depthTextureView;
+	depthStencilAttachment.depthClearValue = 1.0f;
+	depthStencilAttachment.depthLoadOp = LoadOp::Clear;
+	depthStencilAttachment.depthStoreOp = StoreOp::Store;
+	depthStencilAttachment.depthReadOnly = false;
+
+	depthStencilAttachment.stencilClearValue = 0;
+	depthStencilAttachment.stencilLoadOp = LoadOp::Clear;
+	depthStencilAttachment.stencilStoreOp = StoreOp::Store;
+	depthStencilAttachment.stencilReadOnly = true;
+	
 	renderPassDesc.colorAttachmentCount = 1;
 	renderPassDesc.colorAttachments = &renderPassColorAttachment;
-	renderPassDesc.depthStencilAttachment = nullptr;
+	renderPassDesc.depthStencilAttachment = &depthStencilAttachment;
 	renderPassDesc.timestampWrites = nullptr;
 
 	RenderPassEncoder renderPass = encoder.beginRenderPass(renderPassDesc);
@@ -388,6 +412,15 @@ void Application::InitializePipeline() {
 	colorTarget.format = surfaceFormat;
 	colorTarget.blend = &blendState;
 	colorTarget.writeMask = ColorWriteMask::All; // We could write to only some of the color channels.
+
+	depthTextureFormat = TextureFormat::Depth24Plus;
+
+	DepthStencilState depthStencilState = Default;
+	depthStencilState.format = depthTextureFormat;
+	depthStencilState.depthCompare = CompareFunction::Less;
+	depthStencilState.depthWriteEnabled = true;
+	depthStencilState.stencilReadMask = 0;
+	depthStencilState.stencilWriteMask = 0;
 	
 	// We have only one target because our render pass has only one output color
 	// attachment.
@@ -396,7 +429,7 @@ void Application::InitializePipeline() {
 	pipelineDesc.fragment = &fragmentState;
 
 	// We do not use stencil/depth testing for now
-	pipelineDesc.depthStencil = nullptr;
+	pipelineDesc.depthStencil = &depthStencilState;
 
 	// Samples per pixel
 	pipelineDesc.multisample.count = 1;
@@ -437,6 +470,30 @@ void Application::InitializePipeline() {
 
 	// We no longer need to access the shader module
 	shaderModule.release();
+}
+
+void Application::InitializeTextures() {
+	TextureDescriptor depthTextureDesc;
+	depthTextureDesc.dimension = TextureDimension::_2D;
+	depthTextureDesc.format = depthTextureFormat;
+	depthTextureDesc.mipLevelCount = 1;
+	depthTextureDesc.sampleCount = 1;
+	depthTextureDesc.usage = TextureUsage::RenderAttachment;
+	depthTextureDesc.size = { width, height, 1 };
+	depthTextureDesc.viewFormatCount = 1;
+	depthTextureDesc.viewFormats = (WGPUTextureFormat*)&depthTextureFormat;
+	depthTexture = device.createTexture(depthTextureDesc);
+
+	TextureViewDescriptor depthTextureViewDesc;
+	depthTextureViewDesc.aspect = TextureAspect::DepthOnly;
+	depthTextureViewDesc.baseArrayLayer = 0;
+	depthTextureViewDesc.arrayLayerCount = 1;
+	depthTextureViewDesc.baseMipLevel = 0;
+	depthTextureViewDesc.mipLevelCount = 1;
+	depthTextureViewDesc.dimension = TextureViewDimension::_2D;
+	depthTextureViewDesc.format = depthTextureFormat;
+	depthTextureView = depthTexture.createView(depthTextureViewDesc);
+
 }
 
 RequiredLimits Application::GetRequiredLimits(Adapter adapter) const {
