@@ -5,7 +5,10 @@
 #include <GLFW/glfw3.h>
 #include <glfw3webgpu.h>
 
-#include <glm/glm.hpp>
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_FORCE_LEFT_HANDED
+#include <glm/glm.hpp> // all types inspired from GLSL
+#include <glm/ext.hpp>
 
 #ifdef __EMSCRIPTEN__
 #  include <emscripten.h>
@@ -19,6 +22,12 @@
 #include "ResourceManager.h"
 #include "Utility/utility.h"
 using namespace wgpu;
+
+using glm::mat4x4;
+using glm::vec4;
+using glm::vec3;
+
+constexpr float PI = 3.14159265358979323846f;
 
 class Application {
 public:
@@ -35,12 +44,12 @@ public:
 	bool IsRunning();
 
 private:
-	// Internal structures
-	/**
-	 * The same structure as in the shader, replicated in C++
-	 */
+
 	struct MyUniforms {
-		std::array<float, 4> color;  // or float color[4]
+		mat4x4 projectionMatrix;
+		mat4x4 viewMatrix;
+		mat4x4 modelMatrix;
+		vec4 color;
 		float time;
 		float _pad[3];
 	};
@@ -210,6 +219,16 @@ void Application::MainLoop() {
 	// Only update the 1-st float of the buffer
 	queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, time), &time, sizeof(float));
 
+	// angle1 = uniforms.time;
+	// R1 = glm::rotate(mat4x4(1.0), angle1, vec3(0.0, 0.0, 1.0));
+	// uniforms.modelMatrix = R1 * T1 * S;
+	// queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, modelMatrix), &uniforms.modelMatrix, sizeof(MyUniforms::modelMatrix));
+	float angle1 = time;
+	mat4x4 M(1.0);
+	M = glm::rotate(M, angle1, vec3(0.0, 0.0, 1.0));
+	M = glm::translate(M, vec3(0.5, 0.0, 0.0));
+	M = glm::scale(M, vec3(0.3f));
+	queue.writeBuffer(uniformBuffer, offsetof(MyUniforms, modelMatrix), &M, sizeof(MyUniforms::modelMatrix));
 	// Get the next target texture view
 	TextureView targetView = GetNextSurfaceTextureView();
 	if (!targetView) return;
@@ -255,7 +274,7 @@ void Application::MainLoop() {
 	// Select which render pipeline to use
 	renderPass.setPipeline(pipeline);
 
-	uint32_t dynamicOffset = 0;
+	// uint32_t dynamicOffset = 0;
 
 	// Set vertex buffer while encoding the render pass
 	renderPass.setVertexBuffer(0, pointBuffer, 0, pointBuffer.getSize());
@@ -265,8 +284,8 @@ void Application::MainLoop() {
 	renderPass.setIndexBuffer(indexBuffer, IndexFormat::Uint16, 0, indexBuffer.getSize());
 
 	// Set binding group here!
-	dynamicOffset = 0 * uniformStride;
-	renderPass.setBindGroup(0, bindGroup, 1, &dynamicOffset);
+	// dynamicOffset = 0 * uniformStride;
+	renderPass.setBindGroup(0, bindGroup, 0, nullptr);
 	renderPass.drawIndexed(indexCount, 1, 0, 0, 0);
 
 	renderPass.end();
@@ -450,7 +469,6 @@ void Application::InitializePipeline() {
 	bindingLayout.buffer.type = BufferBindingType::Uniform;
 	bindingLayout.buffer.minBindingSize = sizeof(MyUniforms);
 	//                                    ^^^^^^^^^^^^^^^^^^ This was 4 * sizeof(float)
-	bindingLayout.buffer.hasDynamicOffset = true;
 
 	// Create a bind group layout
 	BindGroupLayoutDescriptor bindGroupLayoutDesc{};
@@ -573,23 +591,42 @@ void Application::InitializeBuffers() {
 		(uint32_t)sizeof(MyUniforms),
 		(uint32_t)supportedLimits.limits.minUniformBufferOffsetAlignment
 	);
-	bufferDesc.size = uniformStride + sizeof(MyUniforms);
-	// Make sure to flag the buffer as BufferUsage::Uniform
+	bufferDesc.size = sizeof(MyUniforms);
 	bufferDesc.usage = BufferUsage::CopyDst | BufferUsage::Uniform;
-
 	bufferDesc.mappedAtCreation = false;
 	uniformBuffer = device.createBuffer(bufferDesc);
 
 	// Upload the initial value of the uniforms
+	vec3 focalPoint(0.0, 0.0, -2.0);
+	float angle1 = 2.0f;
+	float angle2 = 3.0f * PI / 4.0f;
+	float ratio = (float)width / height;
+	float focalLength = 2.0;
+	float near = 0.01f;
+	float far = 100.0f;
 	MyUniforms uniforms;
+	mat4x4 M(1.0);
+	M = glm::rotate(M, angle1, vec3(0.0, 0.0, 1.0));
+	M = glm::translate(M, vec3(0.5, 0.0, 0.0));
+	M = glm::scale(M, vec3(0.3f));
+	uniforms.modelMatrix = M;
+
+	mat4x4 V(1.0);
+	V = glm::translate(V, -focalPoint);
+	V = glm::rotate(V, -angle2, vec3(1.0, 0.0, 0.0));
+	uniforms.viewMatrix = V;
+	
+	float fov = 2 * glm::atan(1 / focalLength);
+	uniforms.projectionMatrix = glm::perspective(fov, ratio, near, far);
+
 	uniforms.time = 1.0f;
 	uniforms.color = { 0.0f, 1.0f, 0.4f, 1.0f };
 	queue.writeBuffer(uniformBuffer, 0, &uniforms, sizeof(MyUniforms));
 
-// Upload second value
-	uniforms.time = -1.0f;
-	uniforms.color = { 1.0f, 1.0f, 1.0f, 0.7f };
-	queue.writeBuffer(uniformBuffer, uniformStride, &uniforms, sizeof(MyUniforms));
+	// Upload second value
+	// uniforms.time = -1.0f;
+	// uniforms.color = { 1.0f, 1.0f, 1.0f, 0.7f };
+	// queue.writeBuffer(uniformBuffer, uniformStride, &uniforms, sizeof(MyUniforms));
 }
 
 void Application::InitializeBindGroups() {
